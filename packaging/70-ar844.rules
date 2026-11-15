@@ -1,0 +1,2 @@
+# Replace the IDs below if the USB device uses different values.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="1234", ATTR{idProduct}=="5678", TAG+="uaccess"

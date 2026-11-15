@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ar844-client"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "PySide6-Essentials>=6.8,<6.11",
+    "pyqtgraph>=0.14,<0.15",
+    "hidapi>=0.14,<0.16; sys_platform == 'win32' or sys_platform == 'darwin'",
+    "pyusb>=1.2,<2; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "PyInstaller>=6.12,<7"]
+
+[project.gui-scripts]
+ar844-client = "ar844.app:main"
+
+[tool.setuptools.packages.find]
+include = ["ar844*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,0 +1,53 @@
+name: Desktop test and package
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: Ubuntu-24.04-x64
+          - os: windows-2022
+            target: Windows-x64
+          - os: macos-15
+            target: macOS-arm64
+          - os: macos-15-intel
+            target: macOS-x64
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install Ubuntu runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libusb-1.0-0 libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+      - name: Install client and test dependencies
+        run: python -m pip install ".[dev]"
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Build and smoke test native bundle
+        run: python packaging/build.py
+      - uses: actions/upload-artifact@v6
+        with:
+          name: AR844-Monitor-${{ matrix.target }}
+          path: dist/artifacts/*
+          if-no-files-found: error
+          compression-level: 0
