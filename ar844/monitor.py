@@ -2,12 +2,15 @@ from collections import deque
 from contextlib import closing
 from dataclasses import dataclass, replace
 import logging
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import sys
 from threading import Event, Lock, Thread
 import time
 
-from ar844.device import ConfigUnconfirmed, HidReadTimeout, InvalidReading, Mode, Sample, open_device
+from ar844.device import (
+    ConfigUnconfirmed, HidDevice, HidReadTimeout, InvalidReading, Mode, Sample, UsbDevice, open_device,
+)
 from ar844.storage import connect, initialize, recent, save
 
 HOUR_MS = 3_600_000
@@ -22,6 +25,7 @@ class Settings:
     vid: int = 0x1234
     pid: int = 0x5678
     enabled: bool = True
+    debug: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,7 +40,10 @@ class Monitor:
         self.path = path
         self.demo = demo
         self.windows_hardware = sys.platform == "win32" and not demo
-        self.minimum_interval = 1.0 if self.windows_hardware else 0.25
+        self.debug_path = path.with_name(path.name + ".debug.log")
+        self._debug = logging.Logger("ar844.debug", logging.DEBUG)
+        self._debug_handler = None
+        self._debug_enabled = False
         self.factory = factory
         self._settings = self._normalize(settings)
         self._status = Status("正在打开数据库")
@@ -63,9 +70,34 @@ class Monitor:
         self._wake.set()
 
     def _normalize(self, settings):
-        if settings.interval < self.minimum_interval:
-            return replace(settings, interval=self.minimum_interval)
+        minimum = self.minimum_interval(settings.debug)
+        if settings.interval < minimum:
+            return replace(settings, interval=minimum)
         return settings
+
+    def minimum_interval(self, debug):
+        return 1.0 if self.windows_hardware and debug else 0.25
+
+    def _set_debug(self, enabled):
+        if enabled == self._debug_enabled:
+            return
+        self._debug_enabled = enabled
+        if enabled:
+            try:
+                handler = RotatingFileHandler(self.debug_path, maxBytes=2_000_000,
+                                              backupCount=3, encoding="utf-8")
+            except OSError as exc:
+                LOG.warning("Could not open AR844 debug log: %s", exc)
+                return
+            handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            self._debug.addHandler(handler)
+            self._debug_handler = handler
+            self._debug.debug("debug enabled platform=%s demo=%s", sys.platform, self.demo)
+        elif self._debug_handler is not None:
+            self._debug.debug("debug disabled")
+            self._debug.removeHandler(self._debug_handler)
+            self._debug_handler.close()
+            self._debug_handler = None
 
     def snapshot(self, *, include_points=False):
         with self._lock:
@@ -94,20 +126,27 @@ class Monitor:
                 LOG.warning("Could not close AR844 device: %s", exc)
 
     def _run(self):
-        while not self._stop.is_set():
-            try:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                with closing(connect(self.path)) as conn:
-                    initialize(conn)
-                    points = recent(conn, time.time_ns() // 1_000_000 - HOUR_MS, LIVE_LIMIT)
+        try:
+            while not self._stop.is_set():
+                try:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
                     with self._lock:
-                        self._points.clear()
-                        self._points.extend(points)
-                    self._publish("正在连接", ready=True)
-                    self._collect(conn)
-            except Exception as exc:
-                self._publish(f"数据库不可用：{exc}", ready=False)
-                self._stop.wait(3)
+                        debug_requested = self._settings.debug
+                    self._set_debug(debug_requested)
+                    with closing(connect(self.path)) as conn:
+                        initialize(conn, self._stop.is_set)
+                        points = recent(conn, time.time_ns() // 1_000_000 - HOUR_MS, LIVE_LIMIT)
+                        with self._lock:
+                            self._points.clear()
+                            self._points.extend(points)
+                        self._publish("正在连接", ready=True)
+                        self._collect(conn)
+                except Exception as exc:
+                    self._debug.debug("database_error type=%s error=%s", type(exc).__name__, exc)
+                    self._publish(f"数据库不可用：{exc}", ready=False)
+                    self._stop.wait(3)
+        finally:
+            self._set_debug(False)
 
     def _collect(self, conn):
         device = None
@@ -124,8 +163,18 @@ class Monitor:
                     break
                 with self._lock:
                     settings = self._settings
+                self._set_debug(settings.debug)
+                debug = self._debug_handler is not None
+                windows_debug = self.windows_hardware and settings.debug
                 started = time.monotonic()
                 delay = settings.interval
+                if settings != previous and debug:
+                    self._debug.debug("settings vid=%04x pid=%04x mode=%s interval=%g enabled=%s",
+                                      settings.vid, settings.pid, settings.mode.label,
+                                      settings.interval, settings.enabled)
+                if previous is not None and settings.debug != previous.debug:
+                    next_read = 0
+                    read_timeouts = 0
                 if previous is None or (settings.vid, settings.pid) != (previous.vid, previous.pid):
                     self._close(device)
                     device = None
@@ -151,15 +200,25 @@ class Monitor:
                     if device is None:
                         device = self.factory(settings.vid, settings.pid, self.demo)
                         read_timeouts = 0
-                        if self.windows_hardware:
+                        if debug:
+                            self._debug.debug("connected backend=%s open_ms=%.1f",
+                                              type(device).__name__, (time.monotonic() - started) * 1000)
+                        if windows_debug:
                             next_read = time.monotonic() + 1
                             self._publish("设备已连接 · 等待稳定")
-                    if self.windows_hardware:
+                    if isinstance(device, (HidDevice, UsbDevice)):
+                        device.trace = self._debug.debug if debug else None
+                    if windows_debug:
                         remaining = next_read - time.monotonic()
                         if remaining > 0:
                             self._wake.wait(remaining)
                             continue
+                    read_started = time.monotonic()
                     sample = device.read()
+                    if debug:
+                        self._debug.debug("sample ts_ms=%d db=%.1f mode=%s read_ms=%.1f",
+                                          sample.time_ms, sample.db, sample.mode.label,
+                                          (time.monotonic() - read_started) * 1000)
                     failures = 0
                     read_timeouts = 0
                     message = "正在采集"
@@ -169,9 +228,15 @@ class Monitor:
                             try:
                                 reconnect = device.configure(settings.mode)
                                 config_message = ""
+                                if debug:
+                                    self._debug.debug("config desired=%s actual=%s reopen=%s",
+                                                      settings.mode.label, sample.mode.label, reconnect)
                             except ConfigUnconfirmed as exc:
                                 reconnect = False
                                 config_message = str(exc)
+                                if debug:
+                                    self._debug.debug("config_unconfirmed desired=%s error=%s",
+                                                      settings.mode.label, exc)
                             if reconnect:
                                 self._close(device)
                                 device = None
@@ -184,8 +249,10 @@ class Monitor:
                     failures = 0
                     read_timeouts = 0
                     message = str(exc)
+                    if debug:
+                        self._debug.debug("invalid_reading %s", exc)
                 except Exception as exc:
-                    if isinstance(exc, HidReadTimeout) and read_timeouts == 0:
+                    if settings.debug and isinstance(exc, HidReadTimeout) and read_timeouts == 0:
                         read_timeouts += 1
                         message = f"读数超时 · 下轮重试（{exc}）"
                     else:
@@ -194,11 +261,13 @@ class Monitor:
                         failures = min(failures + 1, 5)
                         delay = max(delay, min(2 ** failures, 30))
                         message = f"等待重连（{exc}）"
+                    if debug:
+                        self._debug.debug("acquisition_error type=%s outcome=%s", type(exc).__name__, message)
 
                 if sample is not None:
                     save(conn, sample)
                 self._publish(message, sample)
-                if self.windows_hardware:
+                if windows_debug:
                     # Match the reference driver: wait after the exchange, including timeouts.
                     next_read = time.monotonic() + delay
                     self._wake.wait(delay)

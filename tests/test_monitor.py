@@ -170,7 +170,7 @@ def test_windows_waits_after_connect_and_after_each_completed_read(tmp_path, mon
         opened_at = time.monotonic()
         return Device()
 
-    settings = Settings(interval=2.0)
+    settings = Settings(interval=2.0, debug=True)
     monitor = Monitor(tmp_path / "test.sqlite3", settings, factory=factory)
     monitor.start()
     try:
@@ -204,7 +204,8 @@ def test_single_hid_timeout_keeps_handle_but_consecutive_timeouts_reconnect(tmp_
         events.append("open")
         return Device()
 
-    monitor = Monitor(tmp_path / "test.sqlite3", Settings(interval=0.25), demo=True, factory=factory)
+    monitor = Monitor(tmp_path / "test.sqlite3", Settings(interval=0.25, debug=True),
+                      demo=True, factory=factory)
     monitor.start()
     try:
         wait_for(lambda: "下轮重试" in monitor.snapshot()[0].text)
@@ -213,6 +214,9 @@ def test_single_hid_timeout_keeps_handle_but_consecutive_timeouts_reconnect(tmp_
     finally:
         monitor.stop()
         assert monitor.join(5)
+    log = monitor.debug_path.read_text(encoding="utf-8")
+    assert "sample " in log and "HidReadTimeout" in log and "connected backend=" in log
+    assert "debug disabled" in log
 
 
 def test_live_cache_does_not_grow_with_run_time(tmp_path):

@@ -29,6 +29,7 @@ class NoiseChart(QWidget):
         self.plot.setMinimumHeight(220)
         self.legend = self.plot.addLegend(offset=(12, 8), labelTextColor="#d8e4f4")
         self.detail = QLabel("移动鼠标查看读数")
+        self.detail.setWordWrap(True)
         self.detail.setTextFormat(Qt.TextFormat.PlainText)
         self.detail.setObjectName("chartDetail")
         self.plot.scene().sigMouseMoved.connect(self._hover)
@@ -114,7 +115,15 @@ def history_points(rows):
         mode = Mode(row["speed"], row["weight"], row["run"])
         detail = None
         if row["end_ms"] is not None:
+            rise = format_db(row["max_rise"])
             detail = (f"{format_time(row['ts'])} 至 {format_time(row['end_ms'])}   "
                       f"峰值 {row['db']:.1f} dB @ {format_time(row['peak_ms'])}   "
-                      f"{row['sample_count']} 条   {mode.label}")
-        yield row["ts"], row["db"], mode, detail
+                      f"{row['sample_count']} 条   {mode.label}\n"
+                      f"最小 {row['min_db']:.1f}   平均 {row['avg_db']:.1f}   "
+                      f"最大单步涨幅 {rise}   P10 {row['p10']:.1f}   P90 {row['p90']:.1f}   "
+                      f"峰值高出底噪 {row['above_floor']:.1f} dB")
+        yield row["ts"], row["plot_db"], mode, detail
+
+
+def format_db(value):
+    return "—" if value is None else f"{value:.1f}"

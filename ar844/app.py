@@ -60,13 +60,17 @@ class SettingsView(QWidget):
         self.speed = self._options(("FAST", "SLOW"), initial.mode.speed)
         self.weight = self._options(("A", "C"), initial.mode.weight)
         self.run = self._options(("NORMAL", "MAX"), initial.mode.run)
+        self.debug = QCheckBox("启用采集 Debug")
+        self.debug.setChecked(initial.debug)
+        self.debug.setToolTip(f"记录采集诊断信息：{monitor.debug_path}")
         self.interval = QDoubleSpinBox()
-        self.interval.setRange(monitor.minimum_interval, 60)
+        self.interval.setRange(monitor.minimum_interval(initial.debug), 60)
+        self.debug.toggled.connect(lambda enabled: self.interval.setMinimum(monitor.minimum_interval(enabled)))
         self.interval.setSingleStep(0.25)
         self.interval.setSuffix(" 秒")
         self.interval.setValue(initial.interval)
         if monitor.windows_hardware:
-            self.interval.setToolTip("每次 HID 采样完成后，等待该时长再发出下一条读取指令。")
+            self.interval.setToolTip("启用 Debug 后，Windows 在每轮采样完成后等待这个间隔。")
         self.vid = QLineEdit(f"{initial.vid:04X}")
         self.pid = QLineEdit(f"{initial.pid:04X}")
         self.enabled = QCheckBox("运行时采集")
@@ -98,6 +102,7 @@ class SettingsView(QWidget):
             layout.addRow(label, field)
         layout.addRow(self.enabled)
         layout.addRow(self.close_to_tray)
+        layout.addRow(self.debug)
         layout.addRow(apply)
         layout.addRow(self.notice)
         self.fixed_path = fixed_path
@@ -126,10 +131,11 @@ class SettingsView(QWidget):
             self.notice.setText("VID 和 PID 必须是 0001 至 FFFF 的十六进制数。")
             return
         mode = Mode(self.speed.currentText(), self.weight.currentText(), self.run.currentText())
-        settings = Settings(mode, self.interval.value(), *ids, self.enabled.isChecked())
+        settings = Settings(mode, self.interval.value(), *ids, self.enabled.isChecked(), self.debug.isChecked())
         values = {"speed": mode.speed, "weight": mode.weight, "run": mode.run,
                   "interval": settings.interval, "vid": settings.vid, "pid": settings.pid,
-                  "enabled": settings.enabled, "close_to_tray": self.close_to_tray.isChecked()}
+                  "enabled": settings.enabled, "debug": settings.debug,
+                  "close_to_tray": self.close_to_tray.isChecked()}
         if not self.fixed_path:
             values["database"] = self.path.text()
         for key, value in values.items():
@@ -140,6 +146,8 @@ class SettingsView(QWidget):
             self.notice.setText("本次运行已应用参数，系统设置存储写入失败。")
         elif Path(self.path.text()) != self.active_path:
             self.notice.setText("监测参数已应用。重启后使用所选数据库，已有记录继续保存在原文件中。")
+        elif settings.debug:
+            self.notice.setText(f"采集 Debug 已开启。诊断日志：{self.monitor.debug_path}")
         else:
             self.notice.setText("设置已保存。请在实时监测页查看设备回读状态。")
 
@@ -356,7 +364,7 @@ def main(argv=None):
     mode = Mode(prefs.value("speed", "FAST"), prefs.value("weight", "C"), prefs.value("run", "NORMAL"))
     settings = Settings(mode, prefs.value("interval", 1.0, type=float),
                         prefs.value("vid", 0x1234, type=int), prefs.value("pid", 0x5678, type=int),
-                        prefs.value("enabled", True, type=bool))
+                        prefs.value("enabled", True, type=bool), prefs.value("debug", False, type=bool))
     if args.smoke_test:
         settings = Settings()
     window = MainWindow(prefs, path, settings, demo, args.database is not None)

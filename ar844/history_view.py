@@ -8,8 +8,8 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ar844.chart import NoiseChart, format_time, history_points
-from ar844.storage import HistoryRequest, PAGE_SIZE, history
+from ar844.chart import NoiseChart, format_db, format_time, history_points
+from ar844.storage import CHART_BINS, METRICS, HistoryRequest, PAGE_SIZE, history
 
 
 class HistoryView(QWidget):
@@ -32,9 +32,16 @@ class HistoryView(QWidget):
             edit.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
             edit.setCalendarPopup(True)
         self.period = QComboBox()
-        for label, minutes in (("原始数据", 0), ("5 分钟峰值", 5), ("15 分钟峰值", 15),
-                               ("30 分钟峰值", 30), ("1 小时峰值", 60)):
+        for label, minutes in (("原始数据", 0), ("5 分钟统计", 5), ("15 分钟统计", 15),
+                               ("30 分钟统计", 30), ("1 小时统计", 60)):
             self.period.addItem(label, minutes)
+        self.metric = QComboBox()
+        for key, (label, _) in METRICS.items():
+            self.metric.addItem(label, key)
+        self.metric.setEnabled(False)
+        self.period.currentIndexChanged.connect(
+            lambda: self.metric.setEnabled(bool(self.period.currentData()))
+        )
         self.weight = QComboBox()
         for label, value in (("全部计权", ""), ("A 计权", "A"), ("C 计权", "C")):
             self.weight.addItem(label, value)
@@ -60,7 +67,7 @@ class HistoryView(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().hide()
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.prev = QPushButton("上一页")
         self.next = QPushButton("下一页")
         self.prev.clicked.connect(lambda: self._page(-1))
@@ -79,7 +86,11 @@ class HistoryView(QWidget):
         tabs.addTab(table_page, "数据表")
         layout = QVBoxLayout(self)
         layout.addLayout(filters)
-        layout.addWidget(self.message)
+        summary = QHBoxLayout()
+        summary.addWidget(QLabel("曲线指标"))
+        summary.addWidget(self.metric)
+        summary.addWidget(self.message, 1)
+        layout.addLayout(summary)
         layout.addWidget(tabs, 1)
         self._buttons()
 
@@ -100,7 +111,8 @@ class HistoryView(QWidget):
     def _search(self):
         request = HistoryRequest(self.start.dateTime().toMSecsSinceEpoch(),
                                  self.end.dateTime().toMSecsSinceEpoch(),
-                                 self.period.currentData(), self.weight.currentData())
+                                 self.period.currentData(), self.weight.currentData(),
+                                 metric=self.metric.currentData())
         if request.end <= request.start:
             self.message.setText("结束时间必须晚于开始时间。")
             return
@@ -150,12 +162,14 @@ class HistoryView(QWidget):
         self.page_info.setText(f"{request.page + 1} / {total_pages}")
         note = " · 统计显示与查询时间重叠的完整窗口" if request.minutes else ""
         if include_chart:
-            self.sampled_chart = len(result.chart) < result.count
+            self.sampled_chart = result.count > 2 * CHART_BINS and len(result.chart) < result.count
             gap = None
             if request.minutes:
                 gap = request.minutes * 60_000
                 if self.sampled_chart:
-                    gap = max(gap, 2 * (request.end - request.start + gap) // 600)
+                    gap = max(gap, 2 * (request.end - request.start + gap) // CHART_BINS)
+            label = METRICS[request.metric][0] if request.minutes else "声级"
+            self.chart.plot.setLabel("left", label, units="dB")
             self.chart.set_points(history_points(result.chart), gap_ms=gap)
             begin = request.start
             if request.minutes:
@@ -169,7 +183,8 @@ class HistoryView(QWidget):
         self._buttons()
 
     def _set_table(self, rows, period):
-        columns = (["窗口开始", "窗口结束", "峰值 dB", "峰值时间", "样本数"]
+        columns = (["窗口开始", "窗口结束", "峰值 dB", "最小值 dB", "平均值 dB",
+                    "最大单步涨幅 dB", "P10 dB", "P90 dB", "峰值高出底噪 dB", "峰值时间", "样本数"]
                    if period else ["采样时间", "读数 dB"])
         columns += ["计权", "快慢", "设备模式"]
         self.table.clearContents()
@@ -179,8 +194,11 @@ class HistoryView(QWidget):
         for i, row in enumerate(rows):
             values = [format_time(row["ts"])]
             if period:
-                values += [format_time(row["end_ms"]), f"{row['db']:.1f}",
-                           format_time(row["peak_ms"]), str(row["sample_count"])]
+                values.append(format_time(row["end_ms"]))
+                values.extend(format_db(row[key]) for key in (
+                    "db", "min_db", "avg_db", "max_rise", "p10", "p90", "above_floor"
+                ))
+                values += [format_time(row["peak_ms"]), str(row["sample_count"])]
             else:
                 values.append(f"{row['db']:.1f}")
             values += [row["weight"], row["speed"], row["run"]]

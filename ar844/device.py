@@ -65,6 +65,8 @@ def decode(packet):
 
 
 class HidDevice:
+    trace = None
+
     def __init__(self, vid, pid):
         import hid
 
@@ -83,6 +85,8 @@ class HidDevice:
 
     def _exchange(self, opcode, flags=0, timeout=1000):
         report = command(opcode, flags, hid=True)
+        if self.trace:
+            self.trace("HID tx=%s timeout_ms=%d", report.hex(" "), timeout)
         # Windows may pad to its longest output report and return the padded size.
         if self.handle.write(report) < len(report):
             raise DeviceError("HID 指令写入不完整")
@@ -96,6 +100,8 @@ class HidDevice:
             reply = self.handle.read(64, remaining_ms)
             if not reply:
                 break
+            if self.trace:
+                self.trace("HID rx bytes=%d data=%s", len(reply), bytes(reply[:16]).hex(" "))
             # A reply left over from the preceding command may arrive first.
             is_ack = reply[0] == 0xC4
             if (expects_ack and is_ack) or (not expects_ack and not is_ack and len(reply) >= 4):
@@ -118,6 +124,8 @@ class HidDevice:
 
 
 class UsbDevice:
+    trace = None
+
     def __init__(self, vid, pid):
         import usb.core
         import usb.util
@@ -155,13 +163,18 @@ class UsbDevice:
 
     def _write(self, opcode, flags=0):
         payload = command(opcode, flags)
+        if self.trace:
+            self.trace("USB tx=%s", payload.hex(" "))
         if self.out.write(payload, timeout=1000) != len(payload):
             raise DeviceError("USB 指令写入不完整")
 
     def read(self):
         self._write(0xB3)
         time.sleep(0.15)
-        return decode(self.input.read(64, timeout=1000))
+        reply = self.input.read(64, timeout=1000)
+        if self.trace:
+            self.trace("USB rx bytes=%d data=%s", len(reply), bytes(reply[:16]).hex(" "))
+        return decode(reply)
 
     def configure(self, mode):
         self._write(0x56, mode.bits)
