@@ -1,12 +1,13 @@
 from collections import deque
 from contextlib import closing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from pathlib import Path
+import sys
 from threading import Event, Lock, Thread
 import time
 
-from ar844.device import ConfigUnconfirmed, InvalidReading, Mode, Sample, open_device
+from ar844.device import ConfigUnconfirmed, HidReadTimeout, InvalidReading, Mode, Sample, open_device
 from ar844.storage import connect, initialize, recent, save
 
 HOUR_MS = 3_600_000
@@ -34,8 +35,10 @@ class Monitor:
     def __init__(self, path: Path, settings: Settings, demo=False, factory=open_device):
         self.path = path
         self.demo = demo
+        self.windows_hardware = sys.platform == "win32" and not demo
+        self.minimum_interval = 1.0 if self.windows_hardware else 0.25
         self.factory = factory
-        self._settings = settings
+        self._settings = self._normalize(settings)
         self._status = Status("正在打开数据库")
         self._points = deque(maxlen=LIVE_LIMIT)
         self._lock = Lock()
@@ -56,8 +59,13 @@ class Monitor:
 
     def update(self, settings):
         with self._lock:
-            self._settings = settings
+            self._settings = self._normalize(settings)
         self._wake.set()
+
+    def _normalize(self, settings):
+        if settings.interval < self.minimum_interval:
+            return replace(settings, interval=self.minimum_interval)
+        return settings
 
     def snapshot(self, *, include_points=False):
         with self._lock:
@@ -105,6 +113,8 @@ class Monitor:
         device = None
         previous = None
         failures = 0
+        read_timeouts = 0
+        next_read = 0.0
         next_config = 0
         config_message = ""
         try:
@@ -140,8 +150,18 @@ class Monitor:
                 try:
                     if device is None:
                         device = self.factory(settings.vid, settings.pid, self.demo)
+                        read_timeouts = 0
+                        if self.windows_hardware:
+                            next_read = time.monotonic() + 1
+                            self._publish("设备已连接 · 等待稳定")
+                    if self.windows_hardware:
+                        remaining = next_read - time.monotonic()
+                        if remaining > 0:
+                            self._wake.wait(remaining)
+                            continue
                     sample = device.read()
                     failures = 0
+                    read_timeouts = 0
                     message = "正在采集"
                     if sample.mode != settings.mode:
                         if started >= next_config:
@@ -162,17 +182,27 @@ class Monitor:
                         config_message = ""
                 except InvalidReading as exc:
                     failures = 0
+                    read_timeouts = 0
                     message = str(exc)
                 except Exception as exc:
-                    self._close(device)
-                    device = None
-                    failures = min(failures + 1, 5)
-                    delay = max(delay, min(2 ** failures, 30))
-                    message = f"等待重连（{exc}）"
+                    if isinstance(exc, HidReadTimeout) and read_timeouts == 0:
+                        read_timeouts += 1
+                        message = f"读数超时 · 下轮重试（{exc}）"
+                    else:
+                        self._close(device)
+                        device = None
+                        failures = min(failures + 1, 5)
+                        delay = max(delay, min(2 ** failures, 30))
+                        message = f"等待重连（{exc}）"
 
                 if sample is not None:
                     save(conn, sample)
                 self._publish(message, sample)
-                self._wake.wait(max(0, started + delay - time.monotonic()))
+                if self.windows_hardware:
+                    # Match the reference driver: wait after the exchange, including timeouts.
+                    next_read = time.monotonic() + delay
+                    self._wake.wait(delay)
+                else:
+                    self._wake.wait(max(0, started + delay - time.monotonic()))
         finally:
             self._close(device)

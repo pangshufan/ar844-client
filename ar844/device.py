@@ -46,6 +46,10 @@ class ConfigUnconfirmed(DeviceError):
     pass
 
 
+class HidReadTimeout(DeviceError):
+    pass
+
+
 def command(opcode, flags=0, *, hid=False):
     payload = bytes([opcode, flags]) + bytes(6)
     return b"\0" + payload if hid else payload
@@ -84,6 +88,7 @@ class HidDevice:
             raise DeviceError("HID 指令写入不完整")
         deadline = time.monotonic() + timeout / 1000
         expects_ack = opcode == 0x56
+        ignored = 0
         while True:
             remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
             if remaining_ms <= 0:
@@ -95,9 +100,11 @@ class HidDevice:
             is_ack = reply[0] == 0xC4
             if (expects_ack and is_ack) or (not expects_ack and not is_ack and len(reply) >= 4):
                 return reply
+            ignored += 1
         if expects_ack:
             raise ConfigUnconfirmed("设备未确认配置指令")
-        raise DeviceError("未收到有效的 HID 读数报文")
+        detail = f"，已跳过 {ignored} 个非读数报文" if ignored else ""
+        raise HidReadTimeout(f"{timeout / 1000:g} 秒内未收到 HID 读数{detail}")
 
     def read(self):
         return decode(self._exchange(0xB3))

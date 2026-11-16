@@ -61,10 +61,12 @@ class SettingsView(QWidget):
         self.weight = self._options(("A", "C"), initial.mode.weight)
         self.run = self._options(("NORMAL", "MAX"), initial.mode.run)
         self.interval = QDoubleSpinBox()
-        self.interval.setRange(0.25, 60)
+        self.interval.setRange(monitor.minimum_interval, 60)
         self.interval.setSingleStep(0.25)
         self.interval.setSuffix(" 秒")
         self.interval.setValue(initial.interval)
+        if monitor.windows_hardware:
+            self.interval.setToolTip("每次 HID 采样完成后，等待该时长再发出下一条读取指令。")
         self.vid = QLineEdit(f"{initial.vid:04X}")
         self.pid = QLineEdit(f"{initial.pid:04X}")
         self.enabled = QCheckBox("运行时采集")

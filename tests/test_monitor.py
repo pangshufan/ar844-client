@@ -1,10 +1,12 @@
 from dataclasses import replace
 from threading import Event
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from ar844.device import ConfigUnconfirmed, HidDevice, Mode, Sample, command, decode
+from ar844 import monitor as monitor_module
+from ar844.device import ConfigUnconfirmed, HidDevice, HidReadTimeout, Mode, Sample, command, decode
 from ar844.monitor import LIVE_LIMIT, Monitor, Settings
 
 
@@ -57,6 +59,9 @@ def test_hid_skips_leftover_reports_and_short_samples():
         device.configure(Mode())
     replies = iter([[0xC4], reading[:3], reading])
     assert device.read().db == 60
+    replies = iter([[0xC4], reading[:3], []])
+    with pytest.raises(HidReadTimeout, match="已跳过 2 个非读数报文"):
+        device.read()
     replies = iter([reading, [0xC4]])
     assert device.configure(Mode()) is False
 
@@ -141,6 +146,73 @@ def test_reconnect_pause_and_shutdown_release_devices(tmp_path):
         monitor.stop()
         assert monitor.join(5)
     assert events[-1] == ("close", 3)
+
+
+def test_windows_waits_after_connect_and_after_each_completed_read(tmp_path, monkeypatch):
+    monkeypatch.setattr(monitor_module, "sys", SimpleNamespace(platform="win32"))
+    readings = []
+    opened_at = None
+    first_finished = Event()
+
+    class Device:
+        def read(self):
+            start = time.monotonic()
+            time.sleep(0.2)
+            readings.append((start, time.monotonic()))
+            first_finished.set()
+            return Sample(time.time_ns() // 1_000_000, 60.0, Mode())
+
+        def close(self):
+            pass
+
+    def factory(*_):
+        nonlocal opened_at
+        opened_at = time.monotonic()
+        return Device()
+
+    settings = Settings(interval=2.0)
+    monitor = Monitor(tmp_path / "test.sqlite3", settings, factory=factory)
+    monitor.start()
+    try:
+        assert first_finished.wait(4)
+        wait_for(lambda: monitor.snapshot()[0].sample is not None)
+        monitor.update(settings)  # A settings wakeup must not cut short the idle period.
+        wait_for(lambda: len(readings) >= 2)
+        assert readings[0][0] - opened_at >= 0.99
+        assert readings[1][0] - readings[0][1] >= 1.99
+    finally:
+        monitor.stop()
+        assert monitor.join(5)
+
+
+def test_single_hid_timeout_keeps_handle_but_consecutive_timeouts_reconnect(tmp_path):
+    events = []
+    replies = iter([60.0, None, 61.0, None, None, 62.0])
+
+    class Device:
+        def read(self):
+            db = next(replies, 62.0)
+            events.append(db)
+            if db is None:
+                raise HidReadTimeout("模拟 HID 读数超时")
+            return Sample(time.time_ns() // 1_000_000, db, Mode())
+
+        def close(self):
+            events.append("close")
+
+    def factory(*_):
+        events.append("open")
+        return Device()
+
+    monitor = Monitor(tmp_path / "test.sqlite3", Settings(interval=0.25), demo=True, factory=factory)
+    monitor.start()
+    try:
+        wait_for(lambda: "下轮重试" in monitor.snapshot()[0].text)
+        wait_for(lambda: 62.0 in events)
+        assert events[:9] == ["open", 60.0, None, 61.0, None, None, "close", "open", 62.0]
+    finally:
+        monitor.stop()
+        assert monitor.join(5)
 
 
 def test_live_cache_does_not_grow_with_run_time(tmp_path):
