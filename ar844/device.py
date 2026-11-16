@@ -42,6 +42,10 @@ class InvalidReading(DeviceError):
     pass
 
 
+class ConfigUnconfirmed(DeviceError):
+    pass
+
+
 def command(opcode, flags=0, *, hid=False):
     payload = bytes([opcode, flags]) + bytes(6)
     return b"\0" + payload if hid else payload
@@ -78,15 +82,28 @@ class HidDevice:
         # Windows may pad to its longest output report and return the padded size.
         if self.handle.write(report) < len(report):
             raise DeviceError("HID 指令写入不完整")
-        return self.handle.read(64, timeout)
+        deadline = time.monotonic() + timeout / 1000
+        expects_ack = opcode == 0x56
+        while True:
+            remaining_ms = math.ceil((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                break
+            reply = self.handle.read(64, remaining_ms)
+            if not reply:
+                break
+            # A reply left over from the preceding command may arrive first.
+            is_ack = reply[0] == 0xC4
+            if (expects_ack and is_ack) or (not expects_ack and not is_ack and len(reply) >= 4):
+                return reply
+        if expects_ack:
+            raise ConfigUnconfirmed("设备未确认配置指令")
+        raise DeviceError("未收到有效的 HID 读数报文")
 
     def read(self):
         return decode(self._exchange(0xB3))
 
     def configure(self, mode):
-        reply = self._exchange(0x56, mode.bits, timeout=500)
-        if not reply or reply[0] != 0xC4:
-            raise DeviceError("设备未确认配置指令")
+        self._exchange(0x56, mode.bits, timeout=500)
         return False
 
     def close(self):

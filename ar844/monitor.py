@@ -6,7 +6,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 import time
 
-from ar844.device import InvalidReading, Mode, Sample, open_device
+from ar844.device import ConfigUnconfirmed, InvalidReading, Mode, Sample, open_device
 from ar844.storage import connect, initialize, recent, save
 
 HOUR_MS = 3_600_000
@@ -106,9 +106,12 @@ class Monitor:
         previous = None
         failures = 0
         next_config = 0
+        config_message = ""
         try:
             while not self._stop.is_set():
                 self._wake.clear()
+                if self._stop.is_set():
+                    break
                 with self._lock:
                     settings = self._settings
                 started = time.monotonic()
@@ -118,12 +121,16 @@ class Monitor:
                     device = None
                     failures = 0
                     next_config = 0
+                    config_message = ""
                 if previous is None or settings.mode != previous.mode:
                     next_config = 0
+                    config_message = ""
                 previous = settings
                 if not settings.enabled:
                     self._close(device)
                     device = None
+                    next_config = 0
+                    config_message = ""
                     self._publish("已暂停")
                     self._wake.wait(60)
                     continue
@@ -137,15 +144,22 @@ class Monitor:
                     failures = 0
                     message = "正在采集"
                     if sample.mode != settings.mode:
-                        message = "采集中 · 等待配置回读"
                         if started >= next_config:
-                            next_config = started + 5
-                            if device.configure(settings.mode):
+                            next_config = time.monotonic() + 5
+                            try:
+                                reconnect = device.configure(settings.mode)
+                                config_message = ""
+                            except ConfigUnconfirmed as exc:
+                                reconnect = False
+                                config_message = str(exc)
+                            if reconnect:
                                 self._close(device)
                                 device = None
                                 delay = max(delay, 2)
+                        message = f"采集中 · {config_message or '等待配置回读'}"
                     else:
                         next_config = 0
+                        config_message = ""
                 except InvalidReading as exc:
                     failures = 0
                     message = str(exc)

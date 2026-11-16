@@ -42,4 +42,6 @@ python packaging/build.py
 
 构建脚本使用 PyInstaller 在当前平台生成程序，运行打包后的模拟设备测试，然后将压缩包写入 `dist/artifacts`。GitHub Actions 在推送、拉取请求或手动触发时，分别在 Ubuntu 24.04、Windows、macOS Apple Silicon 和 macOS Intel 上测试、构建并上传该次运行的 Artifacts。下载后解压，Windows 运行 `AR844-Monitor.exe`，Ubuntu 运行 `AR844-Monitor`，macOS 打开 `AR844-Monitor.app`。macOS 构建未配置 Developer ID 签名与公证，供内部测试。
 
+正式版本的四个平台压缩包可在 [GitHub Releases](https://github.com/pangshufan/ar844-client/releases) 的 Assets 中直接下载。发布前先等 `main` 上该提交的桌面 CI 全部通过，再推送与 `pyproject.toml` 版本一致的标签（如 `v0.1.0`）。发布流程会从该次 CI 取出已通过启动验证的压缩包并上传到 Release。
+
 CI 用模拟设备验证采集、界面、统计查询和打包后的启动，并检查各平台 USB 后端能加载。接入真机后，还需分别验证连续采样、修改参数后的状态回读、反复拔插、睡眠唤醒及托盘恢复。

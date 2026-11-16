@@ -1,0 +1,50 @@
+name: Publish desktop release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - name: Publish packages from successful desktop CI
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "Release tag must match the project version v$version" >&2
+            exit 1
+          fi
+
+          commit="$(git rev-parse HEAD)"
+          run_id="$(gh run list --workflow desktop.yml --branch main --commit "$commit" \
+            --event push --status success --json databaseId --jq '.[0].databaseId // empty')"
+          if [[ -z "$run_id" ]]; then
+            echo "No successful desktop CI run for $commit on main. Wait for CI and rerun this job." >&2
+            exit 1
+          fi
+          gh run download "$run_id" --pattern 'AR844-Monitor-*' --dir release-assets
+
+          shopt -s nullglob
+          assets=()
+          for target in Ubuntu-24.04-x64 Windows-x64 macOS-arm64 macOS-x64; do
+            packages=(release-assets/AR844-Monitor-"$target"/*.zip release-assets/AR844-Monitor-"$target"/*.tar.gz)
+            if [[ "${#packages[@]}" != 1 || ! -s "${packages[0]:-}" ]]; then
+              echo "Expected one application archive for $target in run $run_id" >&2
+              exit 1
+            fi
+            assets+=("${packages[0]}")
+          done
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "AR844 Monitor $GITHUB_REF_NAME" \
+            --notes-from-tag "${assets[@]}"

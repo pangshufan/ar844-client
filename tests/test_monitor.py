@@ -1,7 +1,10 @@
 from dataclasses import replace
+from threading import Event
 import time
 
-from ar844.device import HidDevice, Mode, Sample, command, decode
+import pytest
+
+from ar844.device import ConfigUnconfirmed, HidDevice, Mode, Sample, command, decode
 from ar844.monitor import LIVE_LIMIT, Monitor, Settings
 
 
@@ -30,12 +33,70 @@ def test_hid_transport_accepts_windows_report_padding():
             return 65
 
         def read(self, size, timeout):
-            return [0xC4] if self.opcode == 0x56 else [0x02, 0x58, 0x50]
+            return [0xC4] if self.opcode == 0x56 else [0x02, 0x58, 0x50, 0]
 
     device = HidDevice.__new__(HidDevice)
     device.handle = Handle()
     assert device.configure(Mode()) is False
     assert device.read().db == 60
+
+
+def test_hid_skips_leftover_reports_and_short_samples():
+    class Handle:
+        def write(self, report):
+            return len(report)
+
+        def read(self, size, timeout):
+            return next(replies)
+
+    device = HidDevice.__new__(HidDevice)
+    device.handle = Handle()
+    reading = [0x02, 0x58, 0x50, 0]
+    replies = iter([reading, []])
+    with pytest.raises(ConfigUnconfirmed):
+        device.configure(Mode())
+    replies = iter([[0xC4], reading[:3], reading])
+    assert device.read().db == 60
+    replies = iter([reading, [0xC4]])
+    assert device.configure(Mode()) is False
+
+
+def test_missing_config_ack_keeps_sampling_until_mode_is_verified(tmp_path):
+    confirmed = Event()
+    events = []
+    target = Mode("SLOW", "A")
+
+    class Device:
+        def read(self):
+            mode = target if confirmed.is_set() else Mode()
+            return Sample(time.time_ns() // 1_000_000, 60.0, mode)
+
+        def configure(self, mode):
+            events.append("configure")
+            raise ConfigUnconfirmed("设备未确认配置指令")
+
+        def close(self):
+            events.append("close")
+
+    def factory(*_):
+        events.append("open")
+        return Device()
+
+    monitor = Monitor(tmp_path / "test.sqlite3", Settings(target, 0.25), factory=factory)
+    monitor.start()
+    try:
+        wait_for(lambda: "未确认配置" in monitor.snapshot()[0].text)
+        first = monitor.snapshot()[0].sample
+        wait_for(lambda: monitor.snapshot()[0].sample.time_ms > first.time_ms)
+        assert monitor.snapshot()[0].sample.mode != target
+        confirmed.set()
+        wait_for(lambda: monitor.snapshot()[0].sample.mode == target)
+        assert monitor.snapshot()[0].text == "正在采集"
+        assert events == ["open", "configure"]
+    finally:
+        monitor.stop()
+        assert monitor.join(5)
+    assert events[-1] == "close"
 
 
 def test_reconnect_pause_and_shutdown_release_devices(tmp_path):
